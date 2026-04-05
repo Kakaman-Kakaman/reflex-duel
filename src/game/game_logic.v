@@ -1,11 +1,17 @@
+// =============================================================================
+// game_logic.v  -  Reflex Duel  (4-cell proof of concept)
+// Hit detection uses EDGE signals (rising edge of LDR = light just detected)
+// Edge detection done in top.v before reaching here
+// =============================================================================
+
 module game_logic (
     input  wire        clk,
     input  wire        rst,
     input  wire        start,
-    input  wire [8:0]  p1_ldr,
-    input  wire [8:0]  p2_ldr,
+    input  wire [3:0]  p1_ldr_edge,   // rising edge pulses from top.v
+    input  wire [3:0]  p2_ldr_edge,   // rising edge pulses from top.v
 
-    output reg  [8:0]  led_out,
+    output reg  [3:0]  led_out,
     output reg  [3:0]  p1_score,
     output reg  [3:0]  p2_score,
     output reg  [9:0]  p1_reaction,
@@ -17,9 +23,6 @@ module game_logic (
     output reg         p1_wins
 );
 
-    // =========================================================================
-    // State encoding
-    // =========================================================================
     localparam IDLE         = 3'd0;
     localparam COUNTDOWN    = 3'd1;
     localparam SELECT_LED   = 3'd2;
@@ -28,10 +31,10 @@ module game_logic (
     localparam ROUND_DONE   = 3'd5;
     localparam GAME_OVER    = 3'd6;
 
-    reg [2:0] state, next_state;
+    reg [2:0] state;
 
     // =========================================================================
-    // LFSR - 9-bit for random LED selection (1-9)
+    // LFSR - bottom 2 bits = 0-3, always valid for 4 cells
     // =========================================================================
     reg [8:0] lfsr;
     wire      lfsr_feedback = lfsr[8] ^ lfsr[4];
@@ -41,17 +44,17 @@ module game_logic (
         else     lfsr <= {lfsr[7:0], lfsr_feedback};
     end
 
-    // Map LFSR to LED index 0-8
-    wire [3:0] led_index = lfsr[3:0] % 9;
+    wire [1:0] led_index_raw = 2'b00; // DEMO: always pick cell 0
+    reg  [1:0] led_index_reg;
 
     // =========================================================================
-    // Countdown timer - 3 seconds at 100MHz = 300,000,000 cycles
+    // Countdown timer  3s @ 100MHz
     // =========================================================================
     localparam COUNTDOWN_MAX = 300_000_000;
     reg [28:0] countdown_timer;
 
     // =========================================================================
-    // Reaction timer - counts ms (100,000 cycles per ms at 100MHz)
+    // Reaction timer  counts ms @ 100MHz
     // =========================================================================
     localparam MS_TICKS = 100_000;
     reg [16:0] ms_tick_counter;
@@ -67,9 +70,8 @@ module game_logic (
                 ms_tick_counter <= 0;
                 if (reaction_timer < 999)
                     reaction_timer <= reaction_timer + 1;
-            end else begin
+            end else
                 ms_tick_counter <= ms_tick_counter + 1;
-            end
         end else begin
             ms_tick_counter <= 0;
             reaction_timer  <= 0;
@@ -77,88 +79,83 @@ module game_logic (
     end
 
     // =========================================================================
-    // Hit detection - LDR goes LOW when covered (light blocked)
+    // Hit detection - rising edge of correct LDR cell
     // =========================================================================
-    wire p1_hit = ~p1_ldr[led_index];
-    wire p2_hit = ~p2_ldr[led_index];
+    wire p1_hit = p1_ldr_edge[led_index_reg];
+    wire p2_hit = p2_ldr_edge[led_index_reg];
 
     // =========================================================================
-    // Round done timer - show result for 2 seconds
+    // Round done timer  2s @ 100MHz
     // =========================================================================
     localparam ROUND_DONE_MAX = 200_000_000;
     reg [27:0] round_done_timer;
 
     // =========================================================================
-    // FSM state register
+    // FSM
     // =========================================================================
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            state          <= IDLE;
-            countdown_timer <= 0;
-            round_done_timer<= 0;
-            led_out        <= 9'b0;
-            p1_score       <= 0;
-            p2_score       <= 0;
-            p1_reaction    <= 0;
-            p2_reaction    <= 0;
-            round_num      <= 2'd1;
-            p1_round_wins  <= 0;
-            p2_round_wins  <= 0;
-            game_over      <= 0;
-            p1_wins        <= 0;
-            timer_running  <= 0;
+            state            <= IDLE;
+            countdown_timer  <= 0;
+            round_done_timer <= 0;
+            led_index_reg    <= 0;
+            led_out          <= 4'b0;
+            p1_score         <= 0;
+            p2_score         <= 0;
+            p1_reaction      <= 0;
+            p2_reaction      <= 0;
+            round_num        <= 2'd1;
+            p1_round_wins    <= 0;
+            p2_round_wins    <= 0;
+            game_over        <= 0;
+            p1_wins          <= 0;
+            timer_running    <= 0;
         end else begin
             case (state)
 
                 IDLE: begin
-                    led_out       <= 9'b0;
+                    led_out       <= 4'b0;
                     timer_running <= 0;
-                    if (start)
-                        state <= COUNTDOWN;
+                    if (start) state <= COUNTDOWN;
                 end
 
                 COUNTDOWN: begin
-                    led_out <= 9'b0;
+                    led_out <= 4'b0;
                     if (countdown_timer == COUNTDOWN_MAX - 1) begin
                         countdown_timer <= 0;
-                        state <= SELECT_LED;
-                    end else begin
+                        state           <= SELECT_LED;
+                    end else
                         countdown_timer <= countdown_timer + 1;
-                    end
                 end
 
                 SELECT_LED: begin
-                    // Light up the selected LED on both arrays
-                    led_out       <= (9'b1 << led_index);
+                    led_index_reg <= led_index_raw;
+                    led_out       <= (4'b1 << led_index_raw);
                     timer_running <= 1;
                     state         <= ARMED;
                 end
 
                 ARMED: begin
                     if (p1_hit && !p2_hit) begin
-                        // P1 wins this point
-                        p1_score    <= p1_score + 1;
-                        p1_reaction <= reaction_timer;
+                        p1_score      <= p1_score + 1;
+                        p1_reaction   <= reaction_timer;
                         timer_running <= 0;
-                        led_out     <= 9'b0;
-                        state       <= HIT_DETECTED;
+                        led_out       <= 4'b0;
+                        state         <= HIT_DETECTED;
                     end else if (p2_hit && !p1_hit) begin
-                        // P2 wins this point
-                        p2_score    <= p2_score + 1;
-                        p2_reaction <= reaction_timer;
+                        p2_score      <= p2_score + 1;
+                        p2_reaction   <= reaction_timer;
                         timer_running <= 0;
-                        led_out     <= 9'b0;
-                        state       <= HIT_DETECTED;
+                        led_out       <= 4'b0;
+                        state         <= HIT_DETECTED;
                     end else if (p1_hit && p2_hit) begin
-                        // Simultaneous - no point, redo
                         timer_running <= 0;
-                        led_out     <= 9'b0;
-                        state       <= COUNTDOWN;
+                        led_out       <= 4'b0;
+                        state         <= COUNTDOWN;
                     end
                 end
 
                 HIT_DETECTED: begin
-                    // Check if anyone has won the round (first to 3 points)
                     if (p1_score >= 3) begin
                         p1_round_wins <= p1_round_wins + 1;
                         p1_score      <= 0;
@@ -169,15 +166,13 @@ module game_logic (
                         p1_score      <= 0;
                         p2_score      <= 0;
                         state         <= ROUND_DONE;
-                    end else begin
+                    end else
                         state <= COUNTDOWN;
-                    end
                 end
 
                 ROUND_DONE: begin
                     if (round_done_timer == ROUND_DONE_MAX - 1) begin
                         round_done_timer <= 0;
-                        // Check if anyone won the match (best of 3)
                         if (p1_round_wins >= 2) begin
                             p1_wins   <= 1;
                             game_over <= 1;
@@ -190,15 +185,15 @@ module game_logic (
                             round_num <= round_num + 1;
                             state     <= COUNTDOWN;
                         end
-                    end else begin
+                    end else
                         round_done_timer <= round_done_timer + 1;
-                    end
                 end
 
                 GAME_OVER: begin
-                    // Stay here until reset
-                    led_out <= 9'b0;
+                    led_out <= 4'b0;
                 end
+
+                default: state <= IDLE;
 
             endcase
         end
